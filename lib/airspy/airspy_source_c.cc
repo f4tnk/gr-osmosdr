@@ -31,6 +31,7 @@
 #include <iostream>
 #include <algorithm>
 #include <cstring> //memcpy
+#include <chrono>  //wait_for timeout
 
 #include <boost/assign.hpp>
 #include <boost/format.hpp>
@@ -153,6 +154,22 @@ airspy_source_c::airspy_source_c (const std::string &args)
 
   std::cerr << std::endl;
 
+  /* Force FLOAT32_IQ sample type — required for gr_complex* cast in callback.
+   * Default should be FLOAT32_IQ but this makes it explicit and safe. */
+  ret = airspy_set_sample_type( _dev, AIRSPY_SAMPLE_FLOAT32_IQ );
+  AIRSPY_THROW_ON_ERROR(ret, "Failed to set sample type to FLOAT32_IQ")
+
+  /* Enable USB bit packing by default — packs 4×12-bit into 3×16-bit slots,
+   * reducing USB bandwidth by ~25%. libairspy unpacks transparently.
+   * Can be overridden via pack=0 device arg. */
+  {
+    bool pack = true;
+    if ( dict.count( "pack" ) )
+      pack = boost::lexical_cast<bool>( dict["pack"] );
+    ret = airspy_set_packing(_dev, (uint8_t)pack);
+    AIRSPY_THROW_ON_ERROR(ret, "Failed to set USB bit packing")
+  }
+
   set_center_freq( (get_freq_range().start() + get_freq_range().stop()) / 2.0 );
   set_sample_rate( get_sample_rates().start() );
   set_bandwidth( 0 );
@@ -176,21 +193,17 @@ airspy_source_c::airspy_source_c (const std::string &args)
     AIRSPY_THROW_ON_ERROR(ret, "Failed to enable DC bias")
   }
 
-/* pack 4 sets of 12 bits into 3 sets 16 bits for the data transfer across the
- * USB bus. The default is is unpacked, to transfer 12 bits across the USB bus
- * in 16 bit words. libairspy transparently unpacks if packing is enabled */
-  if ( dict.count( "pack" ) )
-  {
-    bool pack = boost::lexical_cast<bool>( dict["pack"] );
-    int ret = airspy_set_packing(_dev, (uint8_t)pack);
-    AIRSPY_THROW_ON_ERROR(ret, "Failed to set USB bit packing")
-  }
+  /* Packing is now enabled by default above (before set_sample_rate).
+   * The old per-arg override is handled there. */
 
   _fifo = new boost::circular_buffer<gr_complex>(10000000);
   if (!_fifo) {
     throw std::runtime_error( std::string(__FUNCTION__) + " " +
                               "Failed to allocate a sample FIFO!" );
   }
+
+  /* Hint GNU Radio scheduler for buffer alignment — reduces per-call overhead */
+  set_output_multiple(1024);
 }
 
 /*
@@ -303,13 +316,23 @@ int airspy_source_c::work( int noutput_items,
 
   std::unique_lock<std::mutex> lock(_fifo_lock);
 
-  /* Wait until we have the requested number of samples */
+  /* Wait for data with a timeout to prevent hangs if device stops.
+   * Return partial data when available — reduces pipeline latency
+   * which is critical for weak satellite signal tracking loops. */
   int n_samples_avail = _fifo->size();
 
-  while (n_samples_avail < noutput_items) {
-    _samp_avail.wait(lock);
+  while (n_samples_avail == 0) {
+    if (!_samp_avail.wait_for(lock, std::chrono::milliseconds(100),
+        [this]{ return _fifo->size() > 0; })) {
+      return 0; // timeout — no data, let GNU Radio retry
+    }
     n_samples_avail = _fifo->size();
   }
+
+  /* Return whatever is available up to noutput_items — partial return
+   * is valid for sync_block and avoids blocking the GNU Radio pipeline */
+  if (n_samples_avail < noutput_items)
+    noutput_items = n_samples_avail;
 
   // Bulk copy — use linearized array access for contiguous segments
   // circular_buffer stores data in at most 2 contiguous arrays

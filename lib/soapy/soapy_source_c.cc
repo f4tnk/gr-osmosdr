@@ -85,6 +85,9 @@ soapy_source_c::soapy_source_c (const std::string &args)
     // Query MTU for optimal read alignment
     _mtu = _device->getStreamMTU(_stream);
     if (_mtu == 0) _mtu = 65536; // fallback
+
+    // Hint GNU Radio scheduler for buffer alignment — reduces per-call overhead
+    set_output_multiple(std::min((size_t)4096, _mtu));
 }
 
 soapy_source_c::~soapy_source_c(void)
@@ -357,7 +360,7 @@ void soapy_source_c::set_iq_balance( const std::complex<double> &balance, size_t
 double soapy_source_c::set_bandwidth( double bandwidth, size_t chan )
 {
     if ( bandwidth == 0.0 ) /* bandwidth of 0 means automatic filter selection */
-        set_bandwidth(get_sample_rate() * 0.75, chan); /* select narrower filters to prevent aliasing */
+        set_bandwidth(get_sample_rate() * 0.80, chan); /* 80% of Fs: good anti-alias margin for satellite signals */
 
     _device->setBandwidth(SOAPY_SDR_RX, chan, bandwidth);
     return this->get_bandwidth(chan);
