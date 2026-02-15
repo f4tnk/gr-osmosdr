@@ -30,6 +30,7 @@
 
 #include <iostream>
 #include <algorithm> //find
+#include <cstring> //memcpy
 
 #include <boost/assign.hpp>
 #include <boost/format.hpp>
@@ -61,7 +62,8 @@ soapy_source_c_sptr make_soapy_source_c (const std::string &args)
 soapy_source_c::soapy_source_c (const std::string &args)
   : gr::sync_block ("soapy_source_c",
                     gr::io_signature::make (0, 0, 0),
-                    args_to_io_signature(args))
+                    args_to_io_signature(args)),
+    _mtu(0)
 {
     {
         std::lock_guard<std::mutex> l(get_soapy_maker_mutex());
@@ -70,7 +72,19 @@ soapy_source_c::soapy_source_c (const std::string &args)
     _nchan = std::max(1, args_to_io_signature(args)->max_streams());
     std::vector<size_t> channels;
     for (size_t i = 0; i < _nchan; i++) channels.push_back(i);
-    _stream = _device->setupStream(SOAPY_SDR_RX, "CF32", channels);
+
+    // Forward stream args for optimized buffer configuration
+    // These are picked up by SoapyAirspy/SoapySDR modules
+    SoapySDR::Kwargs streamArgs;
+    dict_t dict = params_to_dict(args);
+    if (dict.count("buflen"))  streamArgs["buflen"]  = dict["buflen"];
+    if (dict.count("buffers")) streamArgs["buffers"] = dict["buffers"];
+
+    _stream = _device->setupStream(SOAPY_SDR_RX, "CF32", channels, streamArgs);
+
+    // Query MTU for optimal read alignment
+    _mtu = _device->getStreamMTU(_stream);
+    if (_mtu == 0) _mtu = 65536; // fallback
 }
 
 soapy_source_c::~soapy_source_c(void)
@@ -97,15 +111,35 @@ int soapy_source_c::work( int noutput_items,
     int flags = 0;
     long long timeNs = 0;
     int ret;
-    int retries = 1;
 
-    do {
+    // Clamp read size to MTU for optimal buffer alignment
+    const int toRead = (_mtu > 0 && noutput_items > (int)_mtu)
+                       ? (int)_mtu : noutput_items;
+
+    // Retry on overflow (up to 3 times) to recover latest data
+    for (int retries = 3; retries > 0; --retries)
+    {
         ret = _device->readStream(
             _stream, &output_items[0],
-            noutput_items, flags, timeNs);
-    } while (retries-- && (ret == SOAPY_SDR_OVERFLOW));
+            toRead, flags, timeNs);
 
-    if (ret < 0) return 0; //call again
+        if (__builtin_expect(ret == SOAPY_SDR_OVERFLOW, 0))
+        {
+            // Overflow: hardware buffer overrun, retry to get fresh data
+            flags = 0;
+            continue;
+        }
+        break;
+    }
+
+    // Timeout: not an error, just no data ready yet — call again
+    if (__builtin_expect(ret == SOAPY_SDR_TIMEOUT, 0))
+        return 0;
+
+    // Other errors: return 0 to let GNU Radio retry
+    if (__builtin_expect(ret < 0, 0))
+        return 0;
+
     return ret;
 }
 

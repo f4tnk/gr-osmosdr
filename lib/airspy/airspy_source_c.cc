@@ -30,6 +30,7 @@
 #include <stdexcept>
 #include <iostream>
 #include <algorithm>
+#include <cstring> //memcpy
 
 #include <boost/assign.hpp>
 #include <boost/format.hpp>
@@ -185,7 +186,7 @@ airspy_source_c::airspy_source_c (const std::string &args)
     AIRSPY_THROW_ON_ERROR(ret, "Failed to set USB bit packing")
   }
 
-  _fifo = new boost::circular_buffer<gr_complex>(5000000);
+  _fifo = new boost::circular_buffer<gr_complex>(10000000);
   if (!_fifo) {
     throw std::runtime_error( std::string(__FUNCTION__) + " " +
                               "Failed to allocate a sample FIFO!" );
@@ -233,33 +234,26 @@ int airspy_source_c::_airspy_rx_callback(airspy_transfer *transfer)
 
 int airspy_source_c::airspy_rx_callback(void *samples, int sample_count)
 {
-  size_t i, n_avail, to_copy, num_samples = sample_count;
-  float *sample = (float *)samples;
+  size_t n_avail, to_copy, num_samples = sample_count;
+  const gr_complex *src = (const gr_complex *)samples;
 
   _fifo_lock.lock();
 
   n_avail = _fifo->capacity() - _fifo->size();
   to_copy = (n_avail < num_samples ? n_avail : num_samples);
 
-  for (i = 0; i < to_copy; i++ )
-  {
-    /* Push sample to the fifo */
-    _fifo->push_back( gr_complex( *sample, *(sample+1) ) );
-
-    /* offset to the next I+Q sample */
-    sample += 2;
-  }
+  // Bulk insert — circular_buffer::insert is optimized for contiguous ranges
+  _fifo->insert(_fifo->end(), src, src + to_copy);
 
   _fifo_lock.unlock();
 
   /* We have made some new samples available to the consumer in work() */
-  if (to_copy) {
-    //std::cerr << "+" << std::flush;
+  if (__builtin_expect(to_copy > 0, 1)) {
     _samp_avail.notify_one();
   }
 
   /* Indicate overrun, if neccesary */
-  if (to_copy < num_samples)
+  if (__builtin_expect(to_copy < num_samples, 0))
     std::cerr << "O" << std::flush;
 
   return 0; // TODO: return -1 on error/stop
@@ -317,12 +311,21 @@ int airspy_source_c::work( int noutput_items,
     n_samples_avail = _fifo->size();
   }
 
-  for(int i = 0; i < noutput_items; ++i) {
-    out[i] = _fifo->at(0);
-    _fifo->pop_front();
-  }
+  // Bulk copy — use linearized array access for contiguous segments
+  // circular_buffer stores data in at most 2 contiguous arrays
+  const auto arr1 = _fifo->array_one();
+  const auto arr2 = _fifo->array_two();
 
-  //std::cerr << "-" << std::flush;
+  if ((int)arr1.second >= noutput_items) {
+    // All samples in first contiguous segment
+    std::memcpy(out, arr1.first, noutput_items * sizeof(gr_complex));
+  } else {
+    // Copy from both segments
+    const int from_first = arr1.second;
+    std::memcpy(out, arr1.first, from_first * sizeof(gr_complex));
+    std::memcpy(out + from_first, arr2.first, (noutput_items - from_first) * sizeof(gr_complex));
+  }
+  _fifo->erase_begin(noutput_items);
 
   return noutput_items;
 }

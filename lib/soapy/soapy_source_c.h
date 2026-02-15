@@ -135,6 +135,7 @@ private:
     SoapySDR::Device *_device;
     SoapySDR::Stream *_stream;
     size_t _nchan;
+    size_t _mtu;  // optimal read size from device
 };
 
 #endif /* INCLUDED_SOAPY_SOURCE_C_H */
