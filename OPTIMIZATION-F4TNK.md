@@ -3,7 +3,7 @@
 > **Branche** : `master-f4tnk`  
 > **Base** : gr-osmosdr (osmocom)  
 > **Station** : SatNOGS #3762  
-> **Bilan** : **4 fichiers modifiés**, **124 insertions**, **39 suppressions** — 2 rounds d'optimisation  
+> **Bilan** : **4 fichiers modifiés** — **3 rounds d’optimisation** — 12 optimisations
 > **Cible** : Backends AirSpy + SoapySDR pour réception satellites en signaux faibles
 
 ---
@@ -247,7 +247,97 @@ Les signaux satellites LEO sont à bande étroite au centre — 80% offre un mei
 
 ---
 
-## 🔧 Build — CMake Flags
+## � Optimisations LEO Satellite (Round 3)
+
+### 9. rx\_time Tag PMT — Timestamps matériels vers GNU Radio
+
+`timeNs` était lu par `readStream()` mais jamais exploité. Maintenant chaque appel réussi
+émet un tag `rx_time` au format UHD-compatible :
+
+```
+pmt::make_tuple(pmt::from_uint64(full_secs), pmt::from_double(frac_secs))
+```
+
+Ce tag est lu nativement par `gnuradio/blocks/tagged_file_sink`, `file_meta_sink`,
+et tout bloc downstream qui aligne sur le temps physique.
+Il transporte le timestamp de notre **SoapyAirspy Mod 23** (steady\_clock ns).
+
+```mermaid
+sequenceDiagram
+    participant HW as AirSpy hardware
+    participant SA as SoapyAirspy mod 23
+    participant GR as soapy_source_c mod 9
+    participant DS as Downstream GR blocks
+
+    HW->>SA: USB callback
+    SA->>SA: steady_clock::now() → _buf_timestamps[]
+    SA->>GR: timeNs = _buf_timestamps[handle]
+    GR->>DS: add_item_tag("rx_time",\nmake_tuple(full_secs, frac_secs))
+    DS->>DS: Aligne démodulation / enregistrement
+```
+
+**Fichier :** `soapy_source_c.cc`
+
+### 10. Forwarding Settings — Device String vers writeSetting()
+
+Avant, seuls `buflen`/`buffers` étaient transmis depuis la device string. Maintenant
+`sensitivity_gain`, `linearity_gain`, `ppm`, `biastee`, `bitpack` sont aussi forwardés
+u00e0 `writeSetting()` — **compatible SoapyAirspy mods 16-18**.
+
+```bash
+# Avant — ces args étaient silencieusement ignorés par gr-osmosdr
+soapy=0,driver=airspy,sensitivity_gain=15,ppm=1.2
+
+# Après — transmis directement au driver
+# SoapyAirspy::writeSetting("sensitivity_gain", "15") est appelé
+```
+
+**Fichier :** `soapy_source_c.cc`
+
+### 11. \_\_builtin\_prefetch — Cache Warming
+
+```mermaid
+timeline
+    title Chronologie USB callback (avant / après)
+    Avant lock : [attente lock] → [copie cold]
+    Après lock  : [prefetch L2 stride 256B] → [lock] → [copie warm]
+```
+
+| Point | Prefetch | Localité | Raison |
+|-------|----------|----------|--------|
+| `rx_callback` | `src` stride 256B | L2 (`_MM_HINT_T1`) | Données USB ~24KB, > L1 |
+| `work()` | `out` écriture | L1 (`_MM_HINT_T0`) | Destination immédiate |
+
+**Fichier :** `airspy_source_c.cc`
+
+### 12. Compteur Overflow Atomique
+
+L’ancien code imprimait `"O"` sur stderr à chaque overflow — flood inaccessible.
+
+```cpp
+// Avant
+if (to_copy < num_samples)
+    std::cerr << "O" << std::flush;  // flood, pas de comptage
+
+// Après
+std::atomic<uint32_t> _overflow_count;
+// ...
+const uint32_t cnt = ++_overflow_count;
+if (cnt % 100 == 1)
+    std::cerr << "AirSpy FIFO overflow #" << cnt << std::endl;
+```
+
+| Avant | Après |
+|-------|-------|
+| Print `"O"` à chaque overflow (flood) | Log tous les 100 |
+| Pas de comptage | Compteur atomique cumulatif |
+| Invisible dans SatNOGS | `#N` visible dans les logs client |
+
+**Fichier :** `airspy_source_c.h`, `airspy_source_c.cc`
+
+---
+
+## �🔧 Build — CMake Flags
 
 ```mermaid
 flowchart TD
@@ -291,6 +381,9 @@ xychart-beta
 | Latence pipeline | 100+ ms | < 10 ms | Partial return |
 | Bande USB | 100% | ~75% | Bit packing |
 | Callback CPU/sample | ~4 ops | ~0.5 ops | Bulk insert |
+| Timestamp GR | Absent | `rx_time` PMT tag | Mod 9 |
+| Device string gain | Ignoré | `writeSetting()` | Mod 10 |
+| Overflow log | flood `O` | `#N` tous les 100 | Mod 12 |
 
 ---
 
@@ -300,6 +393,7 @@ xychart-beta
 |--------|------------|
 | `f60a1b9` | **Round 1** : MTU reads, FIFO 10M, bulk insert, memcpy work(), CMake flags |
 | `56cb6ac` | **Round 2** : Force FLOAT32\_IQ, USB packing, partial return, timed wait, anti-alias 0.80 |
+| `8e17305` | **Round 3** : rx\_time PMT tag, settings forwarding, prefetch L2, atomic overflow counter |
 
 ---
 
@@ -334,6 +428,9 @@ sudo ldconfig
 ```bash
 # AirSpy natif avec packing (défaut)
 airspy=0
+
+# AirSpy via SoapySDR — sensitivity_gain + ppm depuis device string (mod 10)
+soapy=0,driver=airspy,sensitivity_gain=15,ppm=1.2
 
 # AirSpy via SoapySDR avec buffers personnalisés
 soapy=0,driver=airspy,buflen=262144,buffers=8
