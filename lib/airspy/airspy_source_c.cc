@@ -95,7 +95,8 @@ airspy_source_c::airspy_source_c (const std::string &args)
     _lna_gain(0),
     _mix_gain(0),
     _vga_gain(0),
-    _bandwidth(0)
+    _bandwidth(0),
+    _overflow_count(0)
 {
 
   int ret;
@@ -250,6 +251,13 @@ int airspy_source_c::airspy_rx_callback(void *samples, int sample_count)
   size_t n_avail, to_copy, num_samples = sample_count;
   const gr_complex *src = (const gr_complex *)samples;
 
+  // Mod 11 — prefetch source data into L2 cache before acquiring the lock.
+  // AirSpy R2 @ 6 MSPS produces ~24 KB/callback; stride 256 bytes (4 cache lines).
+  for (const char *p = (const char *)src,
+                  *end = p + num_samples * sizeof(gr_complex);
+       p < end; p += 256)
+      __builtin_prefetch(p, 0, 1); // read, L2
+
   _fifo_lock.lock();
 
   n_avail = _fifo->capacity() - _fifo->size();
@@ -265,11 +273,14 @@ int airspy_source_c::airspy_rx_callback(void *samples, int sample_count)
     _samp_avail.notify_one();
   }
 
-  /* Indicate overrun, if neccesary */
-  if (__builtin_expect(to_copy < num_samples, 0))
-    std::cerr << "O" << std::flush;
+  /* Mod 12 — atomic overflow counter; log every 100th event to avoid flooding */
+  if (__builtin_expect(to_copy < num_samples, 0)) {
+    const uint32_t cnt = ++_overflow_count;
+    if (cnt % 100 == 1)
+      std::cerr << "AirSpy FIFO overflow #" << cnt << std::endl;
+  }
 
-  return 0; // TODO: return -1 on error/stop
+  return 0;
 }
 
 bool airspy_source_c::start()
@@ -341,10 +352,13 @@ int airspy_source_c::work( int noutput_items,
 
   if ((int)arr1.second >= noutput_items) {
     // All samples in first contiguous segment
+    // Mod 11 — prefetch destination to warm L1 before the copy
+    __builtin_prefetch(out, 1, 0);
     std::memcpy(out, arr1.first, noutput_items * sizeof(gr_complex));
   } else {
     // Copy from both segments
     const int from_first = arr1.second;
+    __builtin_prefetch(out, 1, 0);
     std::memcpy(out, arr1.first, from_first * sizeof(gr_complex));
     std::memcpy(out + from_first, arr2.first, (noutput_items - from_first) * sizeof(gr_complex));
   }

@@ -26,6 +26,7 @@
 
 #include <mutex>
 #include <condition_variable>
+#include <atomic>
 
 #include <gnuradio/sync_block.h>
 
@@ -148,6 +149,8 @@ private:
   double _mix_gain;
   double _vga_gain;
   double _bandwidth;
+  // Mod 12 — atomic overflow counter (replaces silent stderr "O" print)
+  std::atomic<uint32_t> _overflow_count;
 };
 
 #endif /* INCLUDED_AIRSPY_SOURCE_C_H */

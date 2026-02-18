@@ -37,6 +37,7 @@
 #include <boost/lexical_cast.hpp>
 
 #include <gnuradio/io_signature.h>
+#include <pmt/pmt.h>
 
 #include "arg_helpers.h"
 #include "soapy_source_c.h"
@@ -88,6 +89,15 @@ soapy_source_c::soapy_source_c (const std::string &args)
 
     // Hint GNU Radio scheduler for buffer alignment — reduces per-call overhead
     set_output_multiple(std::min((size_t)4096, _mtu));
+
+    // Mod 10 — Forward gain-mode and RF settings from device string to writeSetting().
+    // Enables: soapy=0,driver=airspy,sensitivity_gain=15,ppm=1.2,biastee=true
+    // SoapyAirspy writeSetting() handles each key (see SoapyAirspy mod 10/16/17/18/19).
+    for (const auto &key : std::initializer_list<const char*>{
+            "sensitivity_gain", "linearity_gain", "ppm", "biastee", "bitpack"}) {
+        if (dict.count(key))
+            _device->writeSetting(key, dict.at(key));
+    }
 }
 
 soapy_source_c::~soapy_source_c(void)
@@ -142,6 +152,19 @@ int soapy_source_c::work( int noutput_items,
     // Other errors: return 0 to let GNU Radio retry
     if (__builtin_expect(ret < 0, 0))
         return 0;
+
+    // Mod 9 — Forward hardware receive timestamp as UHD-compatible 'rx_time' tag.
+    // timeNs is filled by SoapyAirspy mod 23 (steady_clock ns since epoch).
+    // gr-satnogs, gr-satellites and gnuradio/blocks/tagged_file_sink can use it.
+    if (__builtin_expect(timeNs != 0, 1)) {
+        const uint64_t full_secs  = (uint64_t)(timeNs / 1000000000LL);
+        const double   frac_secs  = (timeNs % 1000000000LL) / 1e9;
+        add_item_tag(0,
+                     nitems_written(0),
+                     pmt::string_to_symbol("rx_time"),
+                     pmt::make_tuple(pmt::from_uint64(full_secs),
+                                     pmt::from_double(frac_secs)));
+    }
 
     return ret;
 }
