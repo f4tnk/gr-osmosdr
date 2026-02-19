@@ -72,7 +72,7 @@ soapy_source_c::soapy_source_c (const std::string &args)
     }
 
     // Log device identity — useful for verifying F4TNK builds in SatNOGS logs
-    std::cerr << "gr-osmosdr: SoapySDR device: driver=" << _device->getDriverKey()
+    std::cerr << "gr-osmosdr | SoapySDR device: driver=" << _device->getDriverKey()
               << " hw=" << _device->getHardwareKey();
     const auto hwInfo = _device->getHardwareInfo();
     if (hwInfo.count("firmware")) std::cerr << " fw=" << hwInfo.at("firmware");
@@ -120,7 +120,7 @@ bool soapy_source_c::start()
 {
     const int ret = _device->activateStream(_stream);
     if (ret == 0) {
-        std::cerr << "gr-osmosdr: stream activated — "
+        std::cerr << "gr-osmosdr | stream activated — "
                   << _device->getSampleRate(SOAPY_SDR_RX, 0) / 1e6 << " MSPS, "
                   << _device->getFrequency(SOAPY_SDR_RX, 0) / 1e6 << " MHz, "
                   << "gains:";
@@ -133,7 +133,7 @@ bool soapy_source_c::start()
 
 bool soapy_source_c::stop()
 {
-    std::cerr << "gr-osmosdr: stream deactivated" << std::endl;
+    std::cerr << "gr-osmosdr | stream deactivated" << std::endl;
     return _device->deactivateStream(_stream) == 0;
 }
 
