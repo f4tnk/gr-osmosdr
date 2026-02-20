@@ -258,6 +258,9 @@ endif(ENABLE_REDPITAYA)
 ########################################################################
 # Setup FreeSRP component
 ########################################################################
+if(NOT DEFINED LIBFREESRP_FOUND)
+    set(LIBFREESRP_FOUND FALSE)
+endif()
 GR_REGISTER_COMPONENT("FreeSRP support" ENABLE_FREESRP LIBFREESRP_FOUND)
 if(ENABLE_FREESRP)
     add_subdirectory(freesrp)
@@ -266,6 +269,9 @@ endif(ENABLE_FREESRP)
 ########################################################################
 # Setup XTRX component
 ########################################################################
+if(NOT DEFINED LIBXTRX_FOUND)
+    set(LIBXTRX_FOUND FALSE)
+endif()
 GR_REGISTER_COMPONENT("XTRX SDR" ENABLE_XTRX LIBXTRX_FOUND)
 if(ENABLE_XTRX)
     add_subdirectory(xtrx)
