@@ -443,3 +443,18 @@ airspy=0,pack=0
 
 > 🛰️ **F4TNK — Station SatNOGS #3762**  
 > Optimisations C++ des backends SDR pour la réception satellite temps réel sur Raspberry Pi / x86_64
+
+---
+
+## Session 4: Cross-Repo Compatibility Fix (2026-02-20)
+
+### O-X1. C++ Standard Upgrade: C++11 → C++17
+
+**File**: `CMakeLists.txt`  
+**Issue**: gr-osmosdr forced `CMAKE_CXX_STANDARD 11` since its inception. GNU Radio 3.10+ requires **C++17** minimum. While CMake auto-upgraded the standard through transitive target requirements, the explicit C++11 setting created:
+- **ABI mismatch risk**: C++11 `std::string` (COW) vs C++17 `std::string` (SSO) can differ depending on compiler/libstdc++ version  
+- **PMT header mismatch**: GNU Radio 3.10+ PMT uses `std::any`, `std::optional` (C++17 types) in headers  
+- **Static analysis confusion**: linters/analyzers reported C++11 while actual compilation used C++17  
+
+**Fix**: Changed `set(CMAKE_CXX_STANDARD 11)` to `set(CMAKE_CXX_STANDARD 17)`.  
+**Docker**: Also added `-DCMAKE_CXX_STANDARD=20 -DCMAKE_CXX_STANDARD_REQUIRED=ON` to Dockerfile cmake invocation for full ABI match with the GNU Radio build.

@@ -63,7 +63,10 @@ if((CMAKE_CXX_COMPILER_ID MATCHES "Clang" OR
     add_definitions(-fvisibility-inlines-hidden)
 endif()
 
-set(CMAKE_CXX_STANDARD 11)
+# F4TNK: Upgraded from C++11 to C++17 for compatibility with GNU Radio 3.10+/3.11
+# GNU Radio 3.10 requires C++17 minimum. C++11 causes ABI mismatch with GR headers
+# (std::string, PMT types, std::optional) leading to potential segfaults at runtime.
+set(CMAKE_CXX_STANDARD 17)
 
 # Misc options
 if(CMAKE_CXX_COMPILER_ID MATCHES "Clang" OR
